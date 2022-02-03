@@ -1,6 +1,6 @@
 param servicePrefix string
 
-/* VIRTUAL NETWORKS */
+/* VIRTUAL NETWORKS AND NETWORK INFRASTRUCTURE*/
 
 resource vNetIDMZ 'Microsoft.Network/virtualNetworks@2019-11-01' = {
   name: '${servicePrefix}-vnet-idmz'
@@ -73,6 +73,7 @@ resource prvDnsZoneAzureWebSitesVNetLink 'Microsoft.Network/privateDnsZones/virt
     }
   }
 }
+
 /* APP SERVICE */
 /* see https://github.com/Azure/azure-quickstart-templates/blob/master/quickstarts/microsoft.web/app-service-regional-vnet-integration/main.bicep */
 
@@ -137,11 +138,86 @@ resource webAppPrivateDnsEntry 'Microsoft.Network/privateEndpoints/privateDnsZon
   }
 }
 
+/* KEY VAULT AND CERTIFICATE */
+/* from https://github.com/Azure/azure-quickstart-templates/blob/master/quickstarts/microsoft.apimanagement/api-management-key-vault-create/main.bicep*/
 
+resource keyVault 'Microsoft.KeyVault/vaults@2021-06-01-preview' = {
+  name: '${servicePrefix}-kv'
+  location: resourceGroup().location
+  properties: {
+    sku: {
+      name: 'standard'
+      family: 'A'
+    }
+    tenantId: appgwMi.properties.tenantId
+    enableRbacAuthorization: true
+  }
+}
+
+
+//TODO: FAR TOO HIGH ACCESS PRIVILEGES
+var keyVaultAdminRoleDefinitionId = '00482a5a-887f-4fb3-b363-3b7fe8e74483'
+resource kvRoleAssignment 'Microsoft.Authorization/roleAssignments@2020-04-01-preview' = {
+  name: guid(keyVaultAdminRoleDefinitionId,appgwMi.id,keyVault.id)
+  scope: keyVault
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', keyVaultAdminRoleDefinitionId)
+    principalId: appgwMi.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource deploymentScript_AddSelfSignedCertToKv 'Microsoft.Resources/deploymentScripts@2020-10-01' = {
+  name: 'add-self-signed-cert-to-kv'
+  location: resourceGroup().location
+  kind: 'AzureCLI'
+  dependsOn: [
+    keyVault
+    kvRoleAssignment
+  ]
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '/subscriptions/4e82ac8a-f2f3-4f31-a784-5b77bd98ac89/resourceGroups/litmos-d01/providers/Microsoft.ManagedIdentity/userAssignedIdentities/litmos-d01-appgw-mi': {}
+    }
+  }
+  properties: {
+    forceUpdateTag: '1'
+    containerSettings: {
+      containerGroupName: 'mycustomaci'
+    }
+    azCliVersion: '2.32.0'
+    environmentVariables: [
+      {
+        name: 'kv'
+        value: '${servicePrefix}-kv'
+      }
+      {
+        name: 'fqdn'
+        value: '${servicePrefix}.westeurope.cloudapp.azure.com'
+      }
+      {
+        name: 'certname'
+        value: servicePrefix
+      }
+    ]
+    scriptContent: loadTextContent('add-cert.sh')
+    supportingScriptUris: []
+    timeout: 'PT30M'
+    cleanupPreference: 'OnSuccess'
+    retentionInterval: 'P1D'
+  }
+}
+
+
+/* APPLICATION GATEWAY, REQUIRED RESOURCES AND WAF POLICY */
 
 resource wafPolicy 'Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies@2021-05-01' = {
   name: '${servicePrefix}-waf'
   location: resourceGroup().location
+  dependsOn: [
+    deploymentScript_AddSelfSignedCertToKv
+  ]
   properties: {
     customRules: [
         {
@@ -234,13 +310,13 @@ resource appgw 'Microsoft.Network/applicationGateways@2021-05-01' = {
     }
     gatewayIPConfigurations: [
       {
-      name: 'appgw-ip-config'
-      properties: {
-        subnet: {
-          id: resourceId('Microsoft.Network/virtualNetworks/subnets', vNetIDMZ.name, 'app-gateway-subnet')
+        name: 'appgw-ip-config'
+        properties: {
+          subnet: {
+            id: resourceId('Microsoft.Network/virtualNetworks/subnets', vNetIDMZ.name, 'app-gateway-subnet')
+          }
         }
       }
-    }
     ]
     frontendIPConfigurations: [
       {
@@ -253,11 +329,19 @@ resource appgw 'Microsoft.Network/applicationGateways@2021-05-01' = {
         }
       }
     ]
+    sslCertificates: [
+      {
+        name: servicePrefix
+        properties: {
+          keyVaultSecretId: 'https://${servicePrefix}-kv.vault.azure.net/secrets/${servicePrefix}'
+        }
+      }
+    ]
     frontendPorts: [
       {
-        name: 'http'
+        name: 'https'
         properties: {
-          port: 80
+          port: 443
         }
       }
     ]
@@ -307,12 +391,15 @@ resource appgw 'Microsoft.Network/applicationGateways@2021-05-01' = {
       {
         name: '${servicePrefix}-appsvc--listener'
         properties: {
-          protocol: 'Http'
+          protocol: 'Https'
+          sslCertificate: {
+            id: '${appgwResourceId}/sslCertificates/${servicePrefix}'
+          }
           frontendIPConfiguration: {
             id: '${appgwResourceId}/frontendIPConfigurations/appgw-frontend-public-ip'
           }
           frontendPort: {
-            id: '${appgwResourceId}/frontendPorts/http'
+            id: '${appgwResourceId}/frontendPorts/https'
           }
         }
       }
