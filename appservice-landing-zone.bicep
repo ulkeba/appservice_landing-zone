@@ -19,10 +19,9 @@ resource vNetIDMZ 'Microsoft.Network/virtualNetworks@2019-11-01' = {
         }
       }
       {
-        name: 'privateendpoints-subnet'
+        name: 'AzureBastionSubnet'
         properties: {
           addressPrefix: '10.0.1.0/24'
-          privateEndpointNetworkPolicies: 'Disabled'
         }
       }
     ]
@@ -40,6 +39,14 @@ resource vNetHDMZ 'Microsoft.Network/virtualNetworks@2019-11-01' = {
     }
     subnets: [
       {
+        name: 'webapp-privateendpoint-subnet'
+        properties: {
+          addressPrefix: '10.1.1.0/24'
+          privateEndpointNetworkPolicies: 'Disabled'
+        }
+      }
+
+      {
         name: 'app-service-subnet'
         properties: {
           addressPrefix: '10.1.10.0/24'
@@ -53,7 +60,43 @@ resource vNetHDMZ 'Microsoft.Network/virtualNetworks@2019-11-01' = {
           ]
         }
       }
+
+      {
+        name: 'other-services-privateendpoint-subnet'
+        properties: {
+          addressPrefix: '10.1.2.0/24'
+          privateEndpointNetworkPolicies: 'Disabled'
+        }
+      }
+
+      {
+        name: 'vm-subnet'
+        properties: {
+          addressPrefix: '10.1.3.0/24'
+          privateEndpointNetworkPolicies: 'Disabled'
+        }
+      }
     ]
+  }
+}
+
+resource vNetPeeringIdmzToHdmz 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@2021-05-01' = {
+  name: 'idmz-to-hdmz'
+  parent: vNetIDMZ
+  properties: {
+    remoteVirtualNetwork: {
+      id: vNetHDMZ.id
+    }
+  }
+}
+
+resource vNetPeeringHdmzToIdmz 'Microsoft.Network/virtualNetworks/virtualNetworkPeerings@2021-05-01' = {
+  name: 'hdmz-to-idmz'
+  parent: vNetHDMZ
+  properties: {
+    remoteVirtualNetwork: {
+      id: vNetIDMZ.id
+    }
   }
 }
 
@@ -62,14 +105,56 @@ resource prvDnsZoneAzureWebSites 'Microsoft.Network/privateDnsZones@2020-06-01' 
   location: 'global'
 }
 
-resource prvDnsZoneAzureWebSitesVNetLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
+resource prvDnsZoneAzureWebSitesVNetIDMZLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
   parent: prvDnsZoneAzureWebSites
-  name: '${prvDnsZoneAzureWebSites.name}-link'
+  name: '${prvDnsZoneAzureWebSites.name}-to-${vNetIDMZ.name}'
   location: 'global'
   properties: {
     registrationEnabled: false
     virtualNetwork: {
       id: vNetIDMZ.id
+    }
+  }
+}
+
+resource prvDnsZoneAzureWebSitesVNetHDMZLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
+  parent: prvDnsZoneAzureWebSites
+  name: '${prvDnsZoneAzureWebSites.name}-to-${vNetHDMZ.name}'
+  location: 'global'
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: vNetHDMZ.id
+    }
+  }
+}
+
+
+resource prvDnsZoneVaultCore 'Microsoft.Network/privateDnsZones@2020-06-01' = {
+  name: 'privatelink.vaultcore.azure.net'
+  location: 'global'
+}
+
+resource prvDnsZoneVaultCoreVNetIDMZLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
+  parent: prvDnsZoneVaultCore
+  name: '${prvDnsZoneVaultCore.name}-to-${vNetIDMZ.name}'
+  location: 'global'
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: vNetIDMZ.id
+    }
+  }
+}
+
+resource prvDnsZoneVaultCoreVNetHDMZLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = {
+  parent: prvDnsZoneVaultCore
+  name: '${prvDnsZoneVaultCore.name}-to-${vNetHDMZ.name}'
+  location: 'global'
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: vNetHDMZ.id
     }
   }
 }
@@ -93,7 +178,7 @@ resource webApp 'Microsoft.Web/sites@2021-01-01' = {
   kind: 'app'
   properties: {
     serverFarmId: appServicePlan.id
-    virtualNetworkSubnetId: vNetHDMZ.properties.subnets[0].id
+    virtualNetworkSubnetId: vNetHDMZ.properties.subnets[1].id
     httpsOnly: true
     siteConfig: {
       vnetRouteAllEnabled: true
@@ -103,11 +188,11 @@ resource webApp 'Microsoft.Web/sites@2021-01-01' = {
 
 
 resource webAppPrivateEndpoint 'Microsoft.Network/privateEndpoints@2021-05-01' = {
-  name: '${servicePrefix}-privateendpoint'
+  name: '${webApp.name}-privateendpoint'
   location: resourceGroup().location
   properties: {
     subnet: {
-      id: vNetIDMZ.properties.subnets[1].id
+      id: vNetHDMZ.properties.subnets[0].id
     }
     privateLinkServiceConnections: [
       {
@@ -178,7 +263,7 @@ resource deploymentScript_AddSelfSignedCertToKv 'Microsoft.Resources/deploymentS
   identity: {
     type: 'UserAssigned'
     userAssignedIdentities: {
-      '/subscriptions/4e82ac8a-f2f3-4f31-a784-5b77bd98ac89/resourceGroups/litmos-d01/providers/Microsoft.ManagedIdentity/userAssignedIdentities/litmos-d01-appgw-mi': {}
+      '${appgwMi.id}': {}
     }
   }
   properties: {
@@ -209,6 +294,52 @@ resource deploymentScript_AddSelfSignedCertToKv 'Microsoft.Resources/deploymentS
   }
 }
 
+/* BASTION HOST */
+
+resource bastionHostPIP 'Microsoft.Network/publicIPAddresses@2021-05-01' = {
+  name: '${servicePrefix}-bastion-pip'
+  location: resourceGroup().location
+  sku: {
+    name: 'Standard'
+    tier: 'Regional'
+  }
+  properties: {
+    publicIPAllocationMethod: 'Static'
+  }
+}
+
+resource bastionHost 'Microsoft.Network/bastionHosts@2020-05-01' = {
+  name: '${servicePrefix}-bastion'
+  location: resourceGroup().location
+  properties: {
+    ipConfigurations: [
+      {
+        name: 'ip-configuration'
+        properties: {
+          subnet: {
+            id: vNetIDMZ.properties.subnets[1].id
+          }
+          publicIPAddress: {
+            id: bastionHostPIP.id
+          }
+        }
+      }
+    ]
+  }
+}
+
+
+/* ADMIN VM */
+
+module adminVm 'vm-simple-windows.bicep' = {
+  name: '${servicePrefix}-adminvm'
+  params: {
+    adminUsername: 'demo'
+    adminPassword: 'AdminWin123!?'
+    vmName:  '${servicePrefix}-vm'
+    subnetId: vNetHDMZ.properties.subnets[3].id
+  }
+}
 
 /* APPLICATION GATEWAY, REQUIRED RESOURCES AND WAF POLICY */
 
@@ -422,5 +553,37 @@ resource appgw 'Microsoft.Network/applicationGateways@2021-05-01' = {
         }
       }
     ]
+
   }
+}
+
+resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2021-06-01' = {
+  name: '${servicePrefix}-law'
+  location: resourceGroup().location
+  properties: {
+    sku: {
+        name: 'PerGB2018'
+    }
+  }
+}
+
+resource diagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  name: 'to-law'
+  scope: appgw
+  properties: {
+    workspaceId: logAnalyticsWorkspace.id
+    logs: [
+      {
+        categoryGroup: 'allLogs'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'AllMetrics'
+        enabled: true
+      }
+    ]
+  }
+
 }
