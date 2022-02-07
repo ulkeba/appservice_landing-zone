@@ -1,5 +1,11 @@
 param servicePrefix string
 
+param adminVmUsername string
+
+@minLength(12)
+@secure()
+param adminVmPassword string
+
 /* VIRTUAL NETWORKS AND NETWORK INFRASTRUCTURE*/
 
 resource vNetIDMZ 'Microsoft.Network/virtualNetworks@2019-11-01' = {
@@ -334,8 +340,8 @@ resource bastionHost 'Microsoft.Network/bastionHosts@2020-05-01' = {
 module adminVm 'vm-simple-windows.bicep' = {
   name: '${servicePrefix}-adminvm'
   params: {
-    adminUsername: 'demo'
-    adminPassword: 'AdminWin123!?'
+    adminUsername: adminVmUsername
+    adminPassword: adminVmPassword
     vmName:  '${servicePrefix}-vm'
     subnetId: vNetHDMZ.properties.subnets[3].id
   }
