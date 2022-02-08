@@ -12,7 +12,7 @@ param adminPassword string
 param subnetId string
 
 @description('Size of the virtual machine.')
-param vmSize string = 'Standard_D4ds_v4'
+param vmSize string = 'Standard_D2ds_v4'
 
 @description('Location for all resources.')
 param location string = resourceGroup().location
