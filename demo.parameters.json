@@ -3,7 +3,7 @@
   "contentVersion": "1.0.0.0",
   "parameters": {
     "servicePrefix": {
-      "value": "appsvc-d01"
+      "value": "appsvc-demo"
     },
     "adminVmUsername": {
       "value": "demo"
